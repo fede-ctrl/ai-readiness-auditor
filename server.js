@@ -12,7 +12,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- CORRECTED ENVIRONMENT VARIABLES ---
+// --- Environment Variables ---
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 const APP_BASE_URL = process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL;
@@ -23,7 +23,6 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
-// CORRECTED: This function is updated to work with our new 'hubspot_tokens' table schema.
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase.from('hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
     if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the install URL.`);
@@ -44,8 +43,8 @@ async function getValidAccessToken(portalId) {
 
 // --- API Routes ---
 app.get('/api/install', (req, res) => {
-    // CORRECTED: The SCOPES constant now contains the full, correct list for the AI Auditor.
-    const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation.workflows.read';
+    // CORRECTED: The SCOPES constant now EXACTLY matches the list from your HubSpot account.
+    const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${SCOPES}`;
     res.redirect(authUrl);
 });
@@ -65,7 +64,6 @@ app.get('/api/oauth-callback', async (req, res) => {
         const tokenInfo = await tokenInfoResponse.json();
         const portalId = tokenInfo.hub_id;
 
-        // CORRECTED: This logic now uses our new 'hubspot_tokens' table.
         await supabase.from('hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
         res.redirect(`${APP_BASE_URL}/?portalId=${portalId}`);
@@ -75,175 +73,87 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
-app.get('/api/audit', async (req, res) => {
+// --- NEW AI READINESS AUDIT ENDPOINT ---
+app.get('/api/ai-readiness-audit', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
-    const objectType = req.query.objectType || 'contacts';
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    try {
-        const accessToken = await getValidAccessToken(portalId);
-        const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${objectType}?archived=false`;
-        const propertiesResponse = await fetch(propertiesUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-        if (!propertiesResponse.ok) throw new Error(`Failed to fetch properties for ${objectType}`);
-        const propertiesData = await propertiesResponse.json();
-        const allProperties = propertiesData.results;
-        const propertyNames = allProperties.map(p => p.name);
-        const totalCountResponse = await fetch(`https://api.hubapi.com/crm/v3/objects/${objectType}/search`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 1, properties: ["hs_object_id"] }), });
-        if (!totalCountResponse.ok) throw new Error('Failed to fetch total record count');
-        const totalCountData = await totalCountResponse.json();
-        const totalRecords = totalCountData.total;
-        let recordsSample = [];
-        if (totalRecords > 0) {
-            let after = undefined;
-            for (let i = 0; i < 10; i++) {
-                const sampleUrl = `https://api.hubapi.com/crm/v3/objects/${objectType}?limit=100&properties=${propertyNames.join(',')}` + (after ? `&after=${after}` : '');
-                const sampleResponse = await fetch(sampleUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-                if (!sampleResponse.ok) break;
-                const sampleData = await sampleResponse.json();
-                recordsSample.push(...sampleData.results);
-                if (sampleData.paging && sampleData.paging.next) { after = sampleData.paging.next.after; } else { break; }
-            }
-        }
-        const fillCounts = {};
-        if (recordsSample.length > 0) {
-             recordsSample.forEach(r => Object.keys(r.properties).forEach(p => { if (r.properties[p] !== null && r.properties[p] !== '') fillCounts[p] = (fillCounts[p] || 0) + 1; }));
-        }
-        const auditResults = allProperties.map(prop => {
-            const fillCountInSample = fillCounts[prop.name] || 0;
-            const estimatedTotalFillCount = recordsSample.length > 0 ? Math.round((fillCountInSample / recordsSample.length) * totalRecords) : 0;
-            const fillRate = totalRecords > 0 ? Math.round((estimatedTotalFillCount / totalRecords) * 100) : 0;
-            return { label: prop.label, internalName: prop.name, type: prop.type, description: prop.description || '', isCustom: !prop.hubspotDefined, fillRate, fillCount: estimatedTotalFillCount };
-        });
-        const customProperties = auditResults.filter(p => p.isCustom);
-        const averageCustomFillRate = customProperties.length > 0 ? Math.round(customProperties.reduce((acc, p) => acc + p.fillRate, 0) / customProperties.length) : 0;
-        const propertiesWithZeroFillRate = auditResults.filter(p => p.fillRate === 0).length;
-        res.json({ totalRecords, totalProperties: auditResults.length, averageCustomFillRate, propertiesWithZeroFillRate, properties: auditResults });
-    } catch (error) {
-        console.error(`Audit error for ${objectType}:`, error);
-        res.status(500).json({ message: error.message });
+    if (!portalId) {
+        return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
     }
-});
 
-app.get('/api/data-health', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
     try {
         const accessToken = await getValidAccessToken(portalId);
-        const orphanedContactsSearch = { filterGroups: [{ filters: [{ propertyName: 'associatedcompanyid', operator: 'NOT_HAS_PROPERTY' }] }], limit: 1 };
-        const orphanedContactsRes = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(orphanedContactsSearch) });
-        const orphanedContactsData = await orphanedContactsRes.json();
-        const emptyCompaniesSearch = { filterGroups: [{ filters: [{ propertyName: 'num_associated_contacts', operator: 'EQ', value: 0 }] }], limit: 1 };
-        const emptyCompaniesRes = await fetch('https://api.hubapi.com/crm/v3/objects/companies/search', { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(emptyCompaniesSearch) });
-        const emptyCompaniesData = await emptyCompaniesRes.json();
-        const contactSampleRes = await fetch(`https://api.hubapi.com/crm/v3/objects/contacts?limit=100&properties=email`, { headers: { 'Authorization': `Bearer ${accessToken}` }});
-        const contactSampleData = await contactSampleRes.json();
-        const emailCounts = (contactSampleData.results || []).reduce((acc, c) => { const email = c.properties.email?.toLowerCase(); if(email) acc[email] = (acc[email] || 0) + 1; return acc; }, {});
-        const contactDuplicatesInSample = Object.values(emailCounts).filter(c => c > 1).length;
-        const companySampleRes = await fetch(`https://api.hubapi.com/crm/v3/objects/companies?limit=100&properties=domain`, { headers: { 'Authorization': `Bearer ${accessToken}` }});
-        const companySampleData = await companySampleRes.json();
-        const domainCounts = (companySampleData.results || []).reduce((acc, c) => { const domain = c.properties.domain?.toLowerCase(); if(domain) acc[domain] = (acc[domain] || 0) + 1; return acc; }, {});
-        const companyDuplicatesInSample = Object.values(domainCounts).filter(c => c > 1).length;
-        res.json({ orphanedContacts: orphanedContactsData.total || 0, emptyCompanies: emptyCompaniesData.total || 0, contactDuplicatesInSample, companyDuplicatesInSample });
-    } catch (error) {
-        console.error("Data Health Audit Error:", error);
-        res.status(500).json({ message: error.message });
-    }
-});
+        const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
-// --- ALL ORIGINAL CODE IS PRESERVED BELOW ---
+        // Check 1: Contact to Company Association Rate
+        const getAssociationRate = async () => {
+            const totalContactsSearch = { limit: 1, properties: ['hs_object_id'] };
+            const associatedContactsSearch = {
+                filterGroups: [{ filters: [{ propertyName: 'associations.company', operator: 'HAS_PROPERTY' }] }],
+                limit: 1
+            };
+            const [totalRes, associatedRes] = await Promise.all([
+                fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(totalContactsSearch) }),
+                fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(associatedContactsSearch) })
+            ]);
+            if (!totalRes.ok || !associatedRes.ok) return { metric: 'Contact to Company Association Rate', value: 'API Error', description: 'Failed to fetch contact association data.' };
+            const totalData = await totalRes.json();
+            const associatedData = await associatedRes.json();
+            const totalContacts = totalData.total;
+            const associatedContacts = associatedData.total;
+            const rate = (totalContacts > 0) ? Math.round((associatedContacts / totalContacts) * 100) : 0;
+            return {
+                metric: 'Contact to Company Association Rate',
+                value: `${rate}%`,
+                description: `Of ${totalContacts.toLocaleString()} total contacts, ${associatedContacts.toLocaleString()} are associated with a company.`
+            };
+        };
 
-/*
-// --- PREMIUM FEATURE: Stale Reports Audit (Commented out for now) ---
-// To enable, add 'reports_read' back to the SCOPES constant and uncomment this block.
-app.get('/api/stale-reports', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    try {
-        const accessToken = await getValidAccessToken(portalId);
-        const allReports = [];
-        let after = null;
-        do {
-            const url = `https://api.hubapi.com/reports/v3/reports` + (after ? `?after=${after}` : '');
-            const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-            if (!response.ok) { throw new Error('Failed to fetch reports. Your HubSpot account may not have access to this API or the required permissions were not granted.'); }
+        // Check 2: Lifecycle Stage Distribution
+        const getLifecycleDistribution = async () => {
+            const aggregationBody = { "aggregations": [{ "propertyName": "lifecyclestage", "aggregationType": "COUNT" }] };
+            const response = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/aggregation', { method: 'POST', headers, body: JSON.stringify(aggregationBody) });
+            if (!response.ok) return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: 'Could not fetch lifecycle stage data.' };
             const data = await response.json();
-            allReports.push(...data.results);
-            after = data.paging?.next?.after || null;
-        } while (after);
-        const staleThreshold = new Date();
-        staleThreshold.setDate(staleThreshold.getDate() - 180);
-        const staleReports = allReports.filter(report => new Date(report.updatedAt) < staleThreshold)
-            .map(report => ({ name: report.name, id: report.id, updatedAt: report.updatedAt.split('T')[0] }));
-        staleReports.sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
-        res.json({ staleReports });
-    } catch (error) {
-        console.error("Stale Reports Audit Error:", error);
-        res.status(500).json({ message: error.message });
-    }
-});
-*/
+            const distribution = data.results.map(item => ({ stage: item.label, count: item.count }));
+            return {
+                metric: 'Lifecycle Stage Distribution',
+                value: `${distribution.length} stages in use`,
+                details: distribution,
+                description: 'The breakdown of contacts by their current lifecycle stage.'
+            };
+        };
 
-/*
-// --- PREMIUM FEATURE: Inactive Workflows Audit (Commented out for now) ---
-// To enable, add 'automation' back to the SCOPES constant and uncomment this block.
-app.get('/api/inactive-workflows', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    try {
-        const accessToken = await getValidAccessToken(portalId);
-        const allWorkflows = [];
-        let after = null;
-        do {
-            const url = `https://api.hubapi.com/automation/v3/workflows` + (after ? `?after=${after}` : '');
-            const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-            if (!response.ok) { throw new Error('Failed to fetch workflows. Your HubSpot account may not have access to this API or the required permissions were not granted.'); }
+        // Check 3: Active Workflow Count
+        const getWorkflowCount = async () => {
+            const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
+            if (!response.ok) return { metric: 'Workflow Count', value: 'API Error', description: 'Could not fetch workflow data.' };
             const data = await response.json();
-            allWorkflows.push(...data.results);
-            after = data.paging?.next?.after || null;
-        } while (after);
-        const inactiveWorkflows = allWorkflows.filter(wf => wf.enabled === false)
-            .map(wf => ({ name: wf.name, id: wf.id, updatedAt: wf.updatedAt.split('T')[0] }));
-        inactiveWorkflows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-        res.json({ inactiveWorkflows });
+            const activeWorkflows = data.results.filter(wf => wf.enabled).length;
+            return {
+                metric: 'Active Workflow Count',
+                value: activeWorkflows.toLocaleString(),
+                description: `There are ${activeWorkflows} active workflows in this portal.`
+            };
+        };
+
+        const results = await Promise.all([
+            getAssociationRate(),
+            getLifecycleDistribution(),
+            getWorkflowCount()
+        ]);
+        
+        res.json({ auditResults: results, timestamp: new Date().toISOString() });
+
     } catch (error) {
-        console.error("Inactive Workflows Audit Error:", error);
+        console.error("AI Readiness Audit Error:", error);
         res.status(500).json({ message: error.message });
     }
 });
-*/
-
-app.get('/api/data-health/details', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    const type = req.query.type;
-    if (!portalId || !type) return res.status(400).json({ message: 'Portal ID and audit type are required.' });
-    try {
-        const accessToken = await getValidAccessToken(portalId);
-        let searchBody = {};
-        let objectType = '';
-        if (type === 'orphanedContacts') {
-            objectType = 'contacts';
-            searchBody = { filterGroups: [{ filters: [{ propertyName: 'associatedcompanyid', operator: 'NOT_HAS_PROPERTY' }] }], limit: 20, properties: ['firstname', 'lastname', 'email', 'createdate'] };
-        } else if (type === 'emptyCompanies') {
-            objectType = 'companies';
-            searchBody = { filterGroups: [{ filters: [{ propertyName: 'num_associated_contacts', operator: 'EQ', value: 0 }] }], limit: 20, properties: ['name', 'domain', 'createdate'] };
-        } else {
-            return res.status(400).json({ message: 'Invalid detail type requested.' });
-        }
-        const response = await fetch(`https://api.hubapi.com/crm/v3/objects/${objectType}/search`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(searchBody), });
-        if (!response.ok) throw new Error(`Failed to fetch details for ${type}`);
-        const data = await response.json();
-        res.json({ results: data.results });
-    } catch (error) {
-        console.error(`Drill-down error for ${type}:`, error);
-        res.status(500).json({ message: error.message });
-    }
-});
-
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// CORRECTED: Explicitly set the host to '0.0.0.0' and ensure this final listen call is present.
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server is live on port ${PORT}`);
 });
