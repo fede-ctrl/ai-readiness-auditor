@@ -1,4 +1,5 @@
 require('dotenv').config();
+console.log('--- RAILWAY ENVIRONMENT VARIABLES ---', process.env);
 const express = require('express');
 const fetch = require('node-fetch');
 const { createClient } = require('@supabase/supabase-js');
