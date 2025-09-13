@@ -23,7 +23,6 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
-// SIMPLIFIED: No longer needs portalId as an argument for a single-tenant app.
 async function getValidAccessToken() {
     const { data: installation, error } = await supabase.from('ai-readiness-hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
     if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the /api/install URL.`);
@@ -61,7 +60,10 @@ app.get('/api/oauth-callback', async (req, res) => {
         
         await supabase.from('ai-readiness-hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
-        // SIMPLIFIED: Redirect back to the main page. The frontend will check if it's authenticated.
+        // --- THIS IS THE FIX ---
+        // We set a short-lived cookie that the frontend can check for.
+        res.cookie('hubspot_authenticated', 'true', { maxAge: 15000 }); // Cookie lasts for 15 seconds
+
         res.redirect(APP_BASE_URL);
     } catch (error) {
         console.error(error);
