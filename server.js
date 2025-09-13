@@ -6,17 +6,15 @@ const cors = require('cors');
 const path = require('path');
 
 const app = express();
-// CORRECTED: Render provides the port via an environment variable.
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- CORRECTED ENVIRONMENT VARIABLES ---
+// --- Environment Variables ---
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-// CORRECTED: This now correctly uses the variable provided by Render, with a fallback for other environments.
 const APP_BASE_URL = process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL;
 const REDIRECT_URI = `${APP_BASE_URL}/api/oauth-callback`;
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -33,7 +31,7 @@ async function getValidAccessToken(portalId) {
     
     if (new Date() > new Date(expires_at)) {
         console.log('Refreshing expired access token...');
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www.form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token }), });
+        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token }), });
         if (!response.ok) throw new Error('Failed to refresh access token');
         const newTokens = await response.json();
         access_token = newTokens.access_token;
@@ -74,18 +72,93 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
-// --- Placeholder for AI Readiness Logic ---
+// --- NEW AI READINESS AUDIT ENDPOINT ---
 app.get('/api/ai-readiness-audit', async (req, res) => {
-    // We will build the logic for this endpoint in the next phase.
-    res.json({ message: "AI Readiness Audit endpoint is ready to be built." });
-});
+    const portalId = req.header('X-HubSpot-Portal-Id');
+    if (!portalId) {
+        return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
+    }
 
+    try {
+        const accessToken = await getValidAccessToken(portalId);
+        const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+        // --- Define Individual Audit Checks ---
 
-// CORRECTED: Explicitly set the host to '0.0.0.0' to be compatible with containerized environments.
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Server is live on port ${PORT}`);
-});
+        // Check 1: Contact to Company Association Rate
+        const getAssociationRate = async () => {
+            const totalContactsSearch = { limit: 1, properties: ['hs_object_id'] };
+            const associatedContactsSearch = {
+                filterGroups: [{ filters: [{ propertyName: 'associations.company', operator: 'HAS_PROPERTY' }] }],
+                limit: 1
+            };
+
+            const totalRes = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(totalContactsSearch) });
+            const associatedRes = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(associatedContactsSearch) });
+
+            if (!totalRes.ok || !associatedRes.ok) throw new Error('Failed to fetch contact association data.');
+            
+            const totalData = await totalRes.json();
+            const associatedData = await associatedRes.json();
+            
+            const totalContacts = totalData.total;
+            const associatedContacts = associatedData.total;
+
+            const rate = (totalContacts > 0) ? Math.round((associatedContacts / totalContacts) * 100) : 0;
+            return {
+                metric: 'Contact to Company Association Rate',
+                value: `${rate}%`,
+                description: `Of ${totalContacts.toLocaleString()} total contacts, ${associatedContacts.toLocaleString()} are associated with a company.`
+            };
+        };
+
+        // Check 2: Lifecycle Stage Distribution
+        const getLifecycleDistribution = async () => {
+            const aggregationBody = {
+                "aggregations": [{
+                    "propertyName": "lifecyclestage",
+                    "aggregationType": "COUNT"
+                }]
+            };
+
+            const response = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/aggregation', { method: 'POST', headers, body: JSON.stringify(aggregationBody) });
+            if (!response.ok) return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: 'Could not fetch lifecycle stage data. This API may require a Marketing Hub Professional subscription or higher.'};
+            
+            const data = await response.json();
+            const distribution = data.results.map(item => ({ stage: item.label, count: item.count }));
+
+            return {
+                metric: 'Lifecycle Stage Distribution',
+                value: `${distribution.length} stages in use`,
+                details: distribution,
+                description: 'The breakdown of contacts by their current lifecycle stage.'
+            };
+        };
+
+        // Check 3: Active Workflow Count
+        const getWorkflowCount = async () => {
+            const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
+            if (!response.ok) return { metric: 'Workflow Count', value: 'API Error', description: 'Could not fetch workflow data. Your granted scopes may not include "automation.workflows.read" or the portal may not have access to this API.'};
+
+            const data = await response.json();
+            const activeWorkflows = data.results.filter(wf => wf.enabled).length;
+            
+            return {
+                metric: 'Active Workflow Count',
+                value: activeWorkflows.toLocaleString(),
+                description: `There are ${activeWorkflows} active workflows in this portal.`
+            };
+        };
+
+        // --- Run all checks in parallel for speed ---
+        const results = await Promise.all([
+            getAssociationRate(),
+            getLifecycleDistribution(),
+            getWorkflowCount()
+        ]);
+        
+        res.json({ auditResults: results, timestamp: new Date().toISOString() });
+
+    } catch (error) {
+        console.error("AI Readiness Audit Error:", error);
+        res.status(500).json({ message:
