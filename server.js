@@ -12,37 +12,41 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- Environment Variables ---
+// --- CORRECTED ENVIRONMENT VARIABLES ---
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-const RENDER_EXTERNAL_URL = 'https://hubspot-auditor.cassandraadvisory.com';
-const REDIRECT_URI = `${RENDER_EXTERNAL_URL}/api/oauth-callback`;
+// CORRECTED: REDIRECT_URI now uses the APP_BASE_URL environment variable from Railway.
+const REDIRECT_URI = `${process.env.APP_BASE_URL}/api/oauth-callback`; 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
+// CORRECTED: This function is updated to work with our new 'hubspot_tokens' table schema.
 async function getValidAccessToken(portalId) {
-    const { data: installation, error } = await supabase.from('installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
-    if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
+    // We are now using a single row with id=1 to store the token for this single-portal app.
+    const { data: installation, error } = await supabase.from('hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
+    if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the install URL.`);
+    
     let { refresh_token, access_token, expires_at } = installation;
+    
     if (new Date() > new Date(expires_at)) {
+        console.log('Refreshing expired access token...');
         const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token }), });
         if (!response.ok) throw new Error('Failed to refresh access token');
         const newTokens = await response.json();
         access_token = newTokens.access_token;
         const newExpiresAt = new Date(Date.now() + newTokens.expires_in * 1000).toISOString();
-        await supabase.from('installations').update({ access_token, expires_at: newExpiresAt }).eq('hubspot_portal_id', portalId);
+        await supabase.from('hubspot_tokens').update({ access_token, expires_at: newExpiresAt }).eq('id', 1);
     }
     return access_token;
 }
 
 // --- API Routes ---
 app.get('/api/install', (req, res) => {
-    // --- THIS IS THE CRITICAL CHANGE ---
-    // Scopes have been simplified to only the core CRM permissions to ensure installation succeeds.
-    const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.schemas.companies.read crm.schemas.contacts.read';
+    // CORRECTED: The SCOPES constant now contains the full, correct list for the AI Auditor.
+    const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation.workflows.read';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${SCOPES}`;
     res.redirect(authUrl);
 });
@@ -55,20 +59,29 @@ app.get('/api/oauth-callback', async (req, res) => {
         if (!response.ok) throw new Error(await response.text());
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
+        const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
+
+        // This is a temporary way to get the portal ID for the single-portal app.
         const tokenInfoResponse = await fetch(`https://api.hubapi.com/oauth/v1/access-tokens/${access_token}`);
         if (!tokenInfoResponse.ok) throw new Error('Failed to fetch HubSpot token info');
         const tokenInfo = await tokenInfoResponse.json();
-        const hub_id = tokenInfo.hub_id;
-        const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
-        await supabase.from('installations').upsert({ hubspot_portal_id: hub_id, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'hubspot_portal_id' });
-        res.redirect(`/?portalId=${hub_id}`);
+        const portalId = tokenInfo.hub_id;
+
+        // CORRECTED: This logic now uses our new 'hubspot_tokens' table.
+        await supabase.from('hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
+        
+        // Redirecting back to the base URL to show the main app page with the portal ID.
+        res.redirect(`${process.env.APP_BASE_URL}/?portalId=${portalId}`);
     } catch (error) {
         console.error(error);
         res.status(500).send(`<h1>Server Error</h1><p>${error.message}</p>`);
     }
 });
 
+// NOTE: This is the logic from your previous project.
+// We will replace the contents of this endpoint with our new "AI Readiness" checks in the next phase.
 app.get('/api/audit', async (req, res) => {
+    // For this app, the portalId will come from the frontend after install.
     const portalId = req.header('X-HubSpot-Portal-Id');
     const objectType = req.query.objectType || 'contacts';
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
@@ -87,7 +100,7 @@ app.get('/api/audit', async (req, res) => {
         let recordsSample = [];
         if (totalRecords > 0) {
             let after = undefined;
-            for (let i = 0; i < 10; i++) {
+            for (let i = 0; i < 10; i++) { // Fetch up to 1000 records
                 const sampleUrl = `https://api.hubapi.com/crm/v3/objects/${objectType}?limit=100&properties=${propertyNames.join(',')}` + (after ? `&after=${after}` : '');
                 const sampleResponse = await fetch(sampleUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
                 if (!sampleResponse.ok) break;
@@ -116,6 +129,7 @@ app.get('/api/audit', async (req, res) => {
     }
 });
 
+// NOTE: This is the logic from your previous project.
 app.get('/api/data-health', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
@@ -142,66 +156,7 @@ app.get('/api/data-health', async (req, res) => {
     }
 });
 
-/*
-// --- PREMIUM FEATURE: Stale Reports Audit (Commented out for now) ---
-// To enable, add 'reports_read' back to the SCOPES constant and uncomment this block.
-app.get('/api/stale-reports', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    try {
-        const accessToken = await getValidAccessToken(portalId);
-        const allReports = [];
-        let after = null;
-        do {
-            const url = `https://api.hubapi.com/reports/v3/reports` + (after ? `?after=${after}` : '');
-            const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-            if (!response.ok) { throw new Error('Failed to fetch reports. Your HubSpot account may not have access to this API or the required permissions were not granted.'); }
-            const data = await response.json();
-            allReports.push(...data.results);
-            after = data.paging?.next?.after || null;
-        } while (after);
-        const staleThreshold = new Date();
-        staleThreshold.setDate(staleThreshold.getDate() - 180);
-        const staleReports = allReports.filter(report => new Date(report.updatedAt) < staleThreshold)
-            .map(report => ({ name: report.name, id: report.id, updatedAt: report.updatedAt.split('T')[0] }));
-        staleReports.sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
-        res.json({ staleReports });
-    } catch (error) {
-        console.error("Stale Reports Audit Error:", error);
-        res.status(500).json({ message: error.message });
-    }
-});
-*/
-
-/*
-// --- PREMIUM FEATURE: Inactive Workflows Audit (Commented out for now) ---
-// To enable, add 'automation' back to the SCOPES constant and uncomment this block.
-app.get('/api/inactive-workflows', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    try {
-        const accessToken = await getValidAccessToken(portalId);
-        const allWorkflows = [];
-        let after = null;
-        do {
-            const url = `https://api.hubapi.com/automation/v3/workflows` + (after ? `?after=${after}` : '');
-            const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-            if (!response.ok) { throw new Error('Failed to fetch workflows. Your HubSpot account may not have access to this API or the required permissions were not granted.'); }
-            const data = await response.json();
-            allWorkflows.push(...data.results);
-            after = data.paging?.next?.after || null;
-        } while (after);
-        const inactiveWorkflows = allWorkflows.filter(wf => wf.enabled === false)
-            .map(wf => ({ name: wf.name, id: wf.id, updatedAt: wf.updatedAt.split('T')[0] }));
-        inactiveWorkflows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-        res.json({ inactiveWorkflows });
-    } catch (error) {
-        console.error("Inactive Workflows Audit Error:", error);
-        res.status(500).json({ message: error.message });
-    }
-});
-*/
-
+// NOTE: This is the logic from your previous project.
 app.get('/api/data-health/details', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     const type = req.query.type;
@@ -229,8 +184,11 @@ app.get('/api/data-health/details', async (req, res) => {
     }
 });
 
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+
+app.listen(PORT, () => console.log(`✅ Server is live on port ${PORT}`));
 
 app.listen(PORT, () => console.log(`✅ Server is live on port ${PORT}`));
