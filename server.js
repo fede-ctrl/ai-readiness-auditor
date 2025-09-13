@@ -24,7 +24,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
 async function getValidAccessToken(portalId) {
-    const { data: installation, error } = await supabase.from('hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
+    // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens'
+    const { data: installation, error } = await supabase.from('ai-readiness-hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
     if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the install URL.`);
     
     let { refresh_token, access_token, expires_at } = installation;
@@ -36,14 +37,14 @@ async function getValidAccessToken(portalId) {
         const newTokens = await response.json();
         access_token = newTokens.access_token;
         const newExpiresAt = new Date(Date.now() + newTokens.expires_in * 1000).toISOString();
-        await supabase.from('hubspot_tokens').update({ access_token, expires_at: newExpiresAt }).eq('id', 1);
+        // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens'
+        await supabase.from('ai-readiness-hubspot_tokens').update({ access_token, expires_at: newExpiresAt }).eq('id', 1);
     }
     return access_token;
 }
 
 // --- API Routes ---
 app.get('/api/install', (req, res) => {
-    // CORRECTED: The SCOPES constant now EXACTLY matches the list from your HubSpot account.
     const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${SCOPES}`;
     res.redirect(authUrl);
@@ -64,7 +65,8 @@ app.get('/api/oauth-callback', async (req, res) => {
         const tokenInfo = await tokenInfoResponse.json();
         const portalId = tokenInfo.hub_id;
 
-        await supabase.from('hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
+        // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens'
+        await supabase.from('ai-readiness-hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
         res.redirect(`${APP_BASE_URL}/?portalId=${portalId}`);
     } catch (error) {
