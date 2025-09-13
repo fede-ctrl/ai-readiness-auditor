@@ -24,7 +24,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
 async function getValidAccessToken(portalId) {
-    // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens'
     const { data: installation, error } = await supabase.from('ai-readiness-hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
     if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the install URL.`);
     
@@ -37,7 +36,6 @@ async function getValidAccessToken(portalId) {
         const newTokens = await response.json();
         access_token = newTokens.access_token;
         const newExpiresAt = new Date(Date.now() + newTokens.expires_in * 1000).toISOString();
-        // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens'
         await supabase.from('ai-readiness-hubspot_tokens').update({ access_token, expires_at: newExpiresAt }).eq('id', 1);
     }
     return access_token;
@@ -54,7 +52,7 @@ app.get('/api/oauth-callback', async (req, res) => {
     const authCode = req.query.code;
     if (!authCode) return res.status(400).send('HubSpot authorization code not found.');
     try {
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
+        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-w-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
         if (!response.ok) throw new Error(await response.text());
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
@@ -65,7 +63,6 @@ app.get('/api/oauth-callback', async (req, res) => {
         const tokenInfo = await tokenInfoResponse.json();
         const portalId = tokenInfo.hub_id;
 
-        // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens'
         await supabase.from('ai-readiness-hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
         res.redirect(`${APP_BASE_URL}/?portalId=${portalId}`);
@@ -116,7 +113,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
             const response = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/aggregation', { method: 'POST', headers, body: JSON.stringify(aggregationBody) });
             if (!response.ok) return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: 'Could not fetch lifecycle stage data.' };
             const data = await response.json();
-            const distribution = data.results.map(item => ({ stage: item.label, count: item.count }));
+            const distribution = (data.results || []).map(item => ({ stage: item.label, count: item.count }));
             return {
                 metric: 'Lifecycle Stage Distribution',
                 value: `${distribution.length} stages in use`,
@@ -130,7 +127,8 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
             const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
             if (!response.ok) return { metric: 'Workflow Count', value: 'API Error', description: 'Could not fetch workflow data.' };
             const data = await response.json();
-            const activeWorkflows = data.results.filter(wf => wf.enabled).length;
+            // CORRECTED: Safely handle cases where data.results might not exist.
+            const activeWorkflows = (data.results || []).filter(wf => wf.enabled).length;
             return {
                 metric: 'Active Workflow Count',
                 value: activeWorkflows.toLocaleString(),
