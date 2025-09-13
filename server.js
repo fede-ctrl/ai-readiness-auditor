@@ -52,7 +52,8 @@ app.get('/api/oauth-callback', async (req, res) => {
     const authCode = req.query.code;
     if (!authCode) return res.status(400).send('HubSpot authorization code not found.');
     try {
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-w-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
+        // CORRECTED: The typo in 'Content-Type' has been fixed from 'x-w-form-urlencoded' to 'x-www-form-urlencoded'.
+        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
         if (!response.ok) throw new Error(await response.text());
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
@@ -127,7 +128,6 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
             const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
             if (!response.ok) return { metric: 'Workflow Count', value: 'API Error', description: 'Could not fetch workflow data.' };
             const data = await response.json();
-            // CORRECTED: Safely handle cases where data.results might not exist.
             const activeWorkflows = (data.results || []).filter(wf => wf.enabled).length;
             return {
                 metric: 'Active Workflow Count',
