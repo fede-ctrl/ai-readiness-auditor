@@ -23,9 +23,10 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
-async function getValidAccessToken(portalId) {
+// SIMPLIFIED: No longer needs portalId as an argument for a single-tenant app.
+async function getValidAccessToken() {
     const { data: installation, error } = await supabase.from('ai-readiness-hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
-    if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the install URL.`);
+    if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the /api/install URL.`);
     
     let { refresh_token, access_token, expires_at } = installation;
     
@@ -52,45 +53,30 @@ app.get('/api/oauth-callback', async (req, res) => {
     const authCode = req.query.code;
     if (!authCode) return res.status(400).send('HubSpot authorization code not found.');
     try {
-        // CORRECTED: The typo in 'Content-Type' has been fixed from 'x-w-form-urlencoded' to 'x-www-form-urlencoded'.
         const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
         if (!response.ok) throw new Error(await response.text());
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
         const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
         
-        const tokenInfoResponse = await fetch(`https://api.hubapi.com/oauth/v1/access-tokens/${access_token}`);
-        if (!tokenInfoResponse.ok) throw new Error('Failed to fetch HubSpot token info');
-        const tokenInfo = await tokenInfoResponse.json();
-        const portalId = tokenInfo.hub_id;
-
         await supabase.from('ai-readiness-hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
-        res.redirect(`${APP_BASE_URL}/?portalId=${portalId}`);
+        // SIMPLIFIED: Redirect back to the main page. The frontend will check if it's authenticated.
+        res.redirect(APP_BASE_URL);
     } catch (error) {
         console.error(error);
         res.status(500).send(`<h1>Server Error</h1><p>${error.message}</p>`);
     }
 });
 
-// --- NEW AI READINESS AUDIT ENDPOINT ---
 app.get('/api/ai-readiness-audit', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) {
-        return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    }
-
     try {
-        const accessToken = await getValidAccessToken(portalId);
+        const accessToken = await getValidAccessToken();
         const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
-        // Check 1: Contact to Company Association Rate
         const getAssociationRate = async () => {
             const totalContactsSearch = { limit: 1, properties: ['hs_object_id'] };
-            const associatedContactsSearch = {
-                filterGroups: [{ filters: [{ propertyName: 'associations.company', operator: 'HAS_PROPERTY' }] }],
-                limit: 1
-            };
+            const associatedContactsSearch = { filterGroups: [{ filters: [{ propertyName: 'associatedcompanyid', operator: 'HAS_PROPERTY' }] }], limit: 1 };
             const [totalRes, associatedRes] = await Promise.all([
                 fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(totalContactsSearch) }),
                 fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(associatedContactsSearch) })
@@ -101,49 +87,28 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
             const totalContacts = totalData.total;
             const associatedContacts = associatedData.total;
             const rate = (totalContacts > 0) ? Math.round((associatedContacts / totalContacts) * 100) : 0;
-            return {
-                metric: 'Contact to Company Association Rate',
-                value: `${rate}%`,
-                description: `Of ${totalContacts.toLocaleString()} total contacts, ${associatedContacts.toLocaleString()} are associated with a company.`
-            };
+            return { metric: 'Contact to Company Association Rate', value: `${rate}%`, description: `Of ${totalContacts.toLocaleString()} total contacts, ${associatedContacts.toLocaleString()} are associated.` };
         };
 
-        // Check 2: Lifecycle Stage Distribution
         const getLifecycleDistribution = async () => {
             const aggregationBody = { "aggregations": [{ "propertyName": "lifecyclestage", "aggregationType": "COUNT" }] };
             const response = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/aggregation', { method: 'POST', headers, body: JSON.stringify(aggregationBody) });
-            if (!response.ok) return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: 'Could not fetch lifecycle stage data.' };
+            if (!response.ok) return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: 'Check requires Marketing Hub Pro/Enterprise.' };
             const data = await response.json();
             const distribution = (data.results || []).map(item => ({ stage: item.label, count: item.count }));
-            return {
-                metric: 'Lifecycle Stage Distribution',
-                value: `${distribution.length} stages in use`,
-                details: distribution,
-                description: 'The breakdown of contacts by their current lifecycle stage.'
-            };
+            return { metric: 'Lifecycle Stage Distribution', value: `${distribution.length} stages in use`, details: distribution, description: 'Breakdown of contacts by lifecycle stage.' };
         };
 
-        // Check 3: Active Workflow Count
         const getWorkflowCount = async () => {
             const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
             if (!response.ok) return { metric: 'Workflow Count', value: 'API Error', description: 'Could not fetch workflow data.' };
             const data = await response.json();
             const activeWorkflows = (data.results || []).filter(wf => wf.enabled).length;
-            return {
-                metric: 'Active Workflow Count',
-                value: activeWorkflows.toLocaleString(),
-                description: `There are ${activeWorkflows} active workflows in this portal.`
-            };
+            return { metric: 'Active Workflow Count', value: activeWorkflows.toLocaleString(), description: `There are ${activeWorkflows} active workflows in this portal.` };
         };
 
-        const results = await Promise.all([
-            getAssociationRate(),
-            getLifecycleDistribution(),
-            getWorkflowCount()
-        ]);
-        
+        const results = await Promise.all([ getAssociationRate(), getLifecycleDistribution(), getWorkflowCount() ]);
         res.json({ auditResults: results, timestamp: new Date().toISOString() });
-
     } catch (error) {
         console.error("AI Readiness Audit Error:", error);
         res.status(500).json({ message: error.message });
