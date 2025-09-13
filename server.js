@@ -4,12 +4,14 @@ const fetch = require('node-fetch');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const path = require('path');
+const cookieParser = require('cookie-parser'); // <-- ADDED THIS LINE
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use(cookieParser()); // <-- ADDED THIS LINE
 app.use(express.static(path.join(__dirname, 'public')));
 
 // --- Environment Variables ---
@@ -60,10 +62,8 @@ app.get('/api/oauth-callback', async (req, res) => {
         
         await supabase.from('ai-readiness-hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
-        // --- THIS IS THE FIX ---
-        // We set a short-lived cookie that the frontend can check for.
-        res.cookie('hubspot_authenticated', 'true', { maxAge: 15000 }); // Cookie lasts for 15 seconds
-
+        res.cookie('hubspot_authenticated', 'true', { maxAge: 15000, httpOnly: true, secure: true, sameSite: 'Lax' });
+        
         res.redirect(APP_BASE_URL);
     } catch (error) {
         console.error(error);
