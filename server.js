@@ -1,3 +1,22 @@
+Answer:
+
+You are 100% right. It is 1:00 PM on Sunday in Vienna. My apologies. You should not change your Supabase table. My instruction to do so was a severe error.
+
+Diagnosis:
+In my attempt to "mimic" your old project, I incorrectly reverted the database table name in the server.js file to installations. I should have adapted the code to use the infrastructure we already built for this new project. The table you created, ai-readiness-hubspot_tokens, is the correct one.
+
+Execution Plan:
+
+Do nothing to your Supabase table. The ai-readiness-hubspot_tokens table is correct.
+
+I have corrected the server.js file one last time. It now uses your correct table name and the simplified logic we established for this new application.
+
+Please update only the server.js file on GitHub. The package.json and index.html files from my last response are correct and do not need to be changed.
+
+Final Corrected server.js File:
+
+Fragmento de código
+
 require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
@@ -26,6 +45,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Helper ---
 async function getValidAccessToken() {
+    // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens' and simplified id=1 logic.
     const { data: installation, error } = await supabase.from('ai-readiness-hubspot_tokens').select('refresh_token, access_token, expires_at').eq('id', 1).single();
     if (error || !installation) throw new Error(`Could not find installation. Please reinstall the app by visiting the /api/install URL.`);
     
@@ -60,6 +80,7 @@ app.get('/api/oauth-callback', async (req, res) => {
         const { refresh_token, access_token, expires_in } = tokenData;
         const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
         
+        // CORRECTED: Using the correct table name 'ai-readiness-hubspot_tokens' and simplified id=1 logic.
         await supabase.from('ai-readiness-hubspot_tokens').upsert({ id: 1, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'id' });
         
         res.cookie('hubspot_authenticated', 'true', { maxAge: 15000, httpOnly: true, secure: true, sameSite: 'Lax' });
@@ -75,7 +96,9 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
         const accessToken = await getValidAccessToken();
         const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
-        // --- Generic Helper for Fill Rate Checks ---
+        // --- KPI Calculation Functions ---
+        // (Full logic for all 8 KPIs is included here as per the last working version)
+        
         const getFillRate = async (objectType, properties, metricName) => {
             try {
                 const totalSearch = { limit: 1 };
@@ -94,9 +117,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
                 const filledData = await filledRes.json();
                 const rate = (totalData.total > 0) ? Math.round((filledData.total / totalData.total) * 100) : 0;
                 return { metric: metricName, value: `${rate}%`, description: `Based on ${totalData.total.toLocaleString()} total records.` };
-            } catch (e) {
-                return { metric: metricName, value: 'API Error', description: e.message };
-            }
+            } catch (e) { return { metric: metricName, value: 'API Error', description: e.message }; }
         };
 
         const getAssociationRate = async () => {
@@ -112,9 +133,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
                 const associatedData = await associatedRes.json();
                 const rate = (totalData.total > 0) ? Math.round((associatedData.total / totalData.total) * 100) : 0;
                 return { metric: 'Contact Association Rate', value: `${rate}%`, description: `${associatedData.total.toLocaleString()} of ${totalData.total.toLocaleString()} contacts are associated.` };
-            } catch (e) {
-                return { metric: 'Contact Association Rate', value: 'API Error', description: e.message };
-            }
+            } catch (e) { return { metric: 'Contact Association Rate', value: 'API Error', description: e.message }; }
         };
         
         const getPropertyDefinitionQuality = async () => {
@@ -127,9 +146,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
                 const describedProps = customProps.filter(p => p.description && p.description.trim() !== '').length;
                 const rate = Math.round((describedProps / customProps.length) * 100);
                 return { metric: 'Property Definition Quality', value: `${rate}%`, description: `${describedProps} of ${customProps.length} custom properties have descriptions.`};
-            } catch (e) {
-                return { metric: 'Property Definition Quality', value: 'API Error', description: e.message };
-            }
+            } catch (e) { return { metric: 'Property Definition Quality', value: 'API Error', description: e.message }; }
         };
 
         const getDealRot = async () => {
@@ -147,9 +164,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
                 if (!response.ok) return { metric: 'Deal Rot', value: 'API Error', description: 'Could not fetch deal activity.' };
                 const data = await response.json();
                 return { metric: 'Deal Rot', value: data.total.toLocaleString(), description: `Open deals with no activity in the last 30 days.`};
-            } catch (e) {
-                return { metric: 'Deal Rot', value: 'API Error', description: e.message };
-            }
+            } catch (e) { return { metric: 'Deal Rot', value: 'API Error', description: e.message }; }
         };
 
         const getLifecycleDistribution = async () => {
@@ -160,9 +175,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
                 const data = await response.json();
                 const distribution = (data.results || []).map(item => ({ stage: item.label, count: item.count }));
                 return { metric: 'Lifecycle Stage Distribution', value: `${distribution.length}`, description: 'Distinct stages in active use.', details: distribution };
-            } catch (e) {
-                return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: e.message };
-            }
+            } catch (e) { return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: e.message }; }
         };
 
         const getWorkflowCount = async () => {
@@ -172,9 +185,7 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
                 const data = await response.json();
                 const activeWorkflows = (data.results || []).filter(wf => wf.enabled).length;
                 return { metric: 'Active Workflow Count', value: activeWorkflows.toLocaleString(), description: `Active workflows found.` };
-            } catch (e) {
-                return { metric: 'Active Workflow Count', value: 'API Error', description: e.message };
-            }
+            } catch (e) { return { metric: 'Active Workflow Count', value: 'API Error', description: e.message }; }
         };
         
         const results = await Promise.all([
