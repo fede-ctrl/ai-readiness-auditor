@@ -22,9 +22,8 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// --- HubSpot API Helper (Your Original, Proven Function) ---
+// --- HubSpot API Helper (Using Your Architecture) ---
 async function getValidAccessToken(portalId) {
-    // CORRECTED: Using your 'ai_readiness_installations' table name
     const { data: installation, error } = await supabase.from('ai_readiness_installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
     let { refresh_token, access_token, expires_at } = installation;
@@ -35,13 +34,12 @@ async function getValidAccessToken(portalId) {
         const newTokens = await response.json();
         access_token = newTokens.access_token;
         const newExpiresAt = new Date(Date.now() + newTokens.expires_in * 1000).toISOString();
-        // CORRECTED: Using your 'ai_readiness_installations' table name
         await supabase.from('ai_readiness_installations').update({ access_token, expires_at: newExpiresAt }).eq('hubspot_portal_id', portalId);
     }
     return access_token;
 }
 
-// --- API Routes (Your Original, Proven Routes) ---
+// --- API Routes (Using Your Architecture) ---
 app.get('/api/install', (req, res) => {
     const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${SCOPES}`;
@@ -62,7 +60,6 @@ app.get('/api/oauth-callback', async (req, res) => {
         const hub_id = tokenInfo.hub_id;
         const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
         
-        // CORRECTED: Using your 'ai_readiness_installations' table name
         await supabase.from('ai_readiness_installations').upsert({ hubspot_portal_id: hub_id, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'hubspot_portal_id' });
         
         res.redirect(`/?portalId=${hub_id}`);
