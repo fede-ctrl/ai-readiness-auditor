@@ -22,10 +22,9 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// --- HubSpot API Helper ---
+// --- HubSpot API Helper (Your Original, Proven Function) ---
 async function getValidAccessToken(portalId) {
-    // CORRECTED: Using the new 'ai_readiness_installations' table name
-    const { data: installation, error } = await supabase.from('ai_readiness_installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
+    const { data: installation, error } = await supabase.from('installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
     let { refresh_token, access_token, expires_at } = installation;
     if (new Date() > new Date(expires_at)) {
@@ -35,13 +34,12 @@ async function getValidAccessToken(portalId) {
         const newTokens = await response.json();
         access_token = newTokens.access_token;
         const newExpiresAt = new Date(Date.now() + newTokens.expires_in * 1000).toISOString();
-        // CORRECTED: Using the new 'ai_readiness_installations' table name
-        await supabase.from('ai_readiness_installations').update({ access_token, expires_at: newExpiresAt }).eq('hubspot_portal_id', portalId);
+        await supabase.from('installations').update({ access_token, expires_at: newExpiresAt }).eq('hubspot_portal_id', portalId);
     }
     return access_token;
 }
 
-// --- API Routes ---
+// --- API Routes (Your Original, Proven Routes) ---
 app.get('/api/install', (req, res) => {
     const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${SCOPES}`;
@@ -62,8 +60,7 @@ app.get('/api/oauth-callback', async (req, res) => {
         const hub_id = tokenInfo.hub_id;
         const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
         
-        // CORRECTED: Using the new 'ai_readiness_installations' table name
-        await supabase.from('ai_readiness_installations').upsert({ hubspot_portal_id: hub_id, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'hubspot_portal_id' });
+        await supabase.from('installations').upsert({ hubspot_portal_id: hub_id, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'hubspot_portal_id' });
         
         res.redirect(`/?portalId=${hub_id}`);
     } catch (error) {
@@ -80,25 +77,36 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
         const accessToken = await getValidAccessToken(portalId);
         const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
-        // --- KPI Calculation Functions (abbreviated for clarity) ---
-        const getFillRate = async (objectType, properties, metricName) => { /* ... full logic ... */ };
-        const getAssociationRate = async () => { /* ... full logic ... */ };
-        const getPropertyDefinitionQuality = async () => { /* ... full logic ... */ };
-        const getDealRot = async () => { /* ... full logic ... */ };
-        const getLifecycleDistribution = async () => { /* ... full logic ... */ };
-        const getWorkflowCount = async () => { /* ... full logic ... */ };
-        
-        const results = await Promise.all([
-            getFillRate('contacts', ['lifecyclestage', 'hs_lead_status', 'phone'], 'Core Contact Fill Rate'),
-            getFillRate('companies', ['industry', 'city', 'domain'], 'Core Company Fill Rate'),
-            getFillRate('deals', ['amount', 'dealstage', 'closedate'], 'Core Deal Fill Rate'),
-            getAssociationRate(),
-            getPropertyDefinitionQuality(),
-            getDealRot(),
-            getLifecycleDistribution(),
+        const getAssociationRate = async () => {
+            try {
+                const totalSearch = { limit: 1 };
+                const associatedSearch = { filterGroups: [{ filters: [{ propertyName: 'associatedcompanyid', operator: 'HAS_PROPERTY' }] }], limit: 1 };
+                const [totalRes, associatedRes] = await Promise.all([
+                    fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(totalSearch) }),
+                    fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(associatedSearch) })
+                ]);
+                if (!totalRes.ok || !associatedRes.ok) return { metric: 'Contact Association Rate', value: 'API Error' };
+                const totalData = await totalRes.json();
+                const associatedData = await associatedRes.json();
+                const rate = (totalData.total > 0) ? Math.round((associatedData.total / totalData.total) * 100) : 0;
+                return { metric: 'Contact Association Rate', value: `${rate}%` };
+            } catch (e) { return { metric: 'Contact Association Rate', value: 'Error' }; }
+        };
+
+        const getWorkflowCount = async () => {
+            try {
+                const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
+                if (!response.ok) return { metric: 'Active Workflow Count', value: 'API Error' };
+                const data = await response.json();
+                const activeWorkflows = (data.results || []).filter(wf => wf.enabled).length;
+                return { metric: 'Active Workflow Count', value: activeWorkflows };
+            } catch (e) { return { metric: 'Active Workflow Count', value: 'Error' }; }
+        };
+
+        const results = await Promise.all([ 
+            getAssociationRate(), 
             getWorkflowCount()
         ]);
-        
         res.json({ auditResults: results });
     } catch (error) {
         console.error("AI Readiness Audit Error:", error);
@@ -113,4 +121,3 @@ app.get('*', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server is live on port ${PORT}`);
 });
-
