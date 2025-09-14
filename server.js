@@ -22,7 +22,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// --- HubSpot API Helper (Your Original, Proven Function) ---
+// --- HubSpot API Helper ---
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase.from('installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
@@ -39,7 +39,7 @@ async function getValidAccessToken(portalId) {
     return access_token;
 }
 
-// --- API Routes (Your Original, Proven Routes) ---
+// --- API Routes ---
 app.get('/api/install', (req, res) => {
     const SCOPES = 'oauth crm.objects.companies.read crm.objects.contacts.read crm.objects.deals.read crm.schemas.companies.read crm.schemas.contacts.read forms marketing-email automation';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${SCOPES}`;
@@ -59,9 +59,7 @@ app.get('/api/oauth-callback', async (req, res) => {
         const tokenInfo = await tokenInfoResponse.json();
         const hub_id = tokenInfo.hub_id;
         const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
-        
         await supabase.from('installations').upsert({ hubspot_portal_id: hub_id, refresh_token, access_token, expires_at: expiresAt }, { onConflict: 'hubspot_portal_id' });
-        
         res.redirect(`/?portalId=${hub_id}`);
     } catch (error) {
         console.error(error);
@@ -69,7 +67,6 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
-// --- NEW AI READINESS AUDIT ENDPOINT ---
 app.get('/api/ai-readiness-audit', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
@@ -77,37 +74,108 @@ app.get('/api/ai-readiness-audit', async (req, res) => {
         const accessToken = await getValidAccessToken(portalId);
         const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
-        const getAssociationRate = async () => {
+        const getFillRate = async (objectType, properties, metricName) => {
             try {
+                const totalSearch = { limit: 1 };
+                const filledSearch = { 
+                    filterGroups: [{ 
+                        filters: properties.map(prop => ({ propertyName: prop, operator: 'HAS_PROPERTY' }))
+                    }],
+                    limit: 1 
+                };
+                const [totalRes, filledRes] = await Promise.all([
+                    fetch(`https://api.hubapi.com/crm/v3/objects/${objectType}/search`, { method: 'POST', headers, body: JSON.stringify(totalSearch) }),
+                    fetch(`https://api.hubapi.com/crm/v3/objects/${objectType}/search`, { method: 'POST', headers, body: JSON.stringify(filledSearch) })
+                ]);
+                if (!totalRes.ok || !filledRes.ok) return { metric: metricName, value: 'API Error', description: `Could not fetch ${objectType} data.` };
+                const totalData = await totalRes.json();
+                const filledData = await filledRes.json();
+                const rate = (totalData.total > 0) ? Math.round((filledData.total / totalData.total) * 100) : 0;
+                return { metric: metricName, value: `${rate}%`, description: `Based on ${totalData.total.toLocaleString()} total records.` };
+            } catch (e) { return { metric: metricName, value: 'Error', description: e.message }; }
+        };
+
+        const getAssociationRate = async () => {
+             try {
                 const totalSearch = { limit: 1 };
                 const associatedSearch = { filterGroups: [{ filters: [{ propertyName: 'associatedcompanyid', operator: 'HAS_PROPERTY' }] }], limit: 1 };
                 const [totalRes, associatedRes] = await Promise.all([
                     fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(totalSearch) }),
                     fetch('https://api.hubapi.com/crm/v3/objects/contacts/search', { method: 'POST', headers, body: JSON.stringify(associatedSearch) })
                 ]);
-                if (!totalRes.ok || !associatedRes.ok) return { metric: 'Contact Association Rate', value: 'API Error' };
+                if (!totalRes.ok || !associatedRes.ok) return { metric: 'Contact Association Rate', value: 'API Error', description: 'Failed to fetch contact data.' };
                 const totalData = await totalRes.json();
                 const associatedData = await associatedRes.json();
                 const rate = (totalData.total > 0) ? Math.round((associatedData.total / totalData.total) * 100) : 0;
-                return { metric: 'Contact Association Rate', value: `${rate}%` };
-            } catch (e) { return { metric: 'Contact Association Rate', value: 'Error' }; }
+                return { metric: 'Contact Association Rate', value: `${rate}%`, description: `${associatedData.total.toLocaleString()} of ${totalData.total.toLocaleString()} contacts associated.` };
+            } catch (e) { return { metric: 'Contact Association Rate', value: 'Error', description: e.message }; }
+        };
+        
+        const getPropertyDefinitionQuality = async () => {
+            try {
+                const response = await fetch('https://api.hubapi.com/crm/v3/properties/contacts', { headers });
+                if (!response.ok) return { metric: 'Property Definition Quality', value: 'API Error', description: 'Could not fetch property definitions.' };
+                const data = await response.json();
+                const customProps = data.results.filter(p => !p.hubspotDefined);
+                if (customProps.length === 0) return { metric: 'Property Definition Quality', value: 'N/A', description: 'No custom contact properties found.' };
+                const describedProps = customProps.filter(p => p.description && p.description.trim() !== '').length;
+                const rate = Math.round((describedProps / customProps.length) * 100);
+                return { metric: 'Property Definition Quality', value: `${rate}%`, description: `${describedProps} of ${customProps.length} custom properties have descriptions.`};
+            } catch (e) { return { metric: 'Property Definition Quality', value: 'Error', description: e.message }; }
+        };
+
+        const getDealRot = async () => {
+            try {
+                const thirtyDaysAgo = new Date();
+                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                const searchBody = {
+                    filterGroups: [
+                        { filters: [{ propertyName: 'hs_is_closed', operator: 'EQ', value: 'false' }] },
+                        { filters: [{ propertyName: 'hs_last_activity_date', operator: 'LT', value: thirtyDaysAgo.getTime() }] }
+                    ],
+                    limit: 1
+                };
+                const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals/search', { method: 'POST', headers, body: JSON.stringify(searchBody) });
+                if (!response.ok) return { metric: 'Deal Rot', value: 'API Error', description: 'Could not fetch deal activity.' };
+                const data = await response.json();
+                return { metric: 'Deal Rot', value: data.total.toLocaleString(), description: `Open deals with no activity in last 30 days.`};
+            } catch (e) { return { metric: 'Deal Rot', value: 'Error', description: e.message }; }
+        };
+
+        const getLifecycleDistribution = async () => {
+            try {
+                const aggregationBody = { "aggregations": [{ "propertyName": "lifecyclestage", "aggregationType": "COUNT" }] };
+                const response = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/aggregation', { method: 'POST', headers, body: JSON.stringify(aggregationBody) });
+                if (!response.ok) return { metric: 'Lifecycle Stage Distribution', value: 'API Error', description: 'Requires Marketing Hub Pro+.' };
+                const data = await response.json();
+                const distribution = (data.results || []).map(item => ({ stage: item.label, count: item.count }));
+                return { metric: 'Lifecycle Stage Distribution', value: `${distribution.length}`, description: 'Distinct stages in active use.', details: distribution };
+            } catch (e) { return { metric: 'Lifecycle Stage Distribution', value: 'Error', description: e.message }; }
         };
 
         const getWorkflowCount = async () => {
             try {
                 const response = await fetch('https://api.hubapi.com/automation/v3/workflows', { headers });
-                if (!response.ok) return { metric: 'Active Workflow Count', value: 'API Error' };
+                if (!response.ok) return { metric: 'Active Workflow Count', value: 'API Error', description: 'Could not fetch workflows.' };
                 const data = await response.json();
                 const activeWorkflows = (data.results || []).filter(wf => wf.enabled).length;
-                return { metric: 'Active Workflow Count', value: activeWorkflows };
-            } catch (e) { return { metric: 'Active Workflow Count', value: 'Error' }; }
+                return { metric: 'Active Workflow Count', value: activeWorkflows.toLocaleString(), description: `Active workflows found.` };
+            } catch (e) { return { metric: 'Active Workflow Count', value: 'Error', description: e.message }; }
         };
-
-        const results = await Promise.all([ 
-            getAssociationRate(), 
+        
+        const results = await Promise.all([
+            getFillRate('contacts', ['lifecyclestage', 'hs_lead_status', 'phone'], 'Core Contact Fill Rate'),
+            getFillRate('companies', ['industry', 'city', 'domain'], 'Core Company Fill Rate'),
+            getFillRate('deals', ['amount', 'dealstage', 'closedate'], 'Core Deal Fill Rate'),
+            getAssociationRate(),
+            getPropertyDefinitionQuality(),
+            getDealRot(),
+            getLifecycleDistribution(),
             getWorkflowCount()
         ]);
+        
         res.json({ auditResults: results });
+
     } catch (error) {
         console.error("AI Readiness Audit Error:", error);
         res.status(500).json({ message: error.message });
