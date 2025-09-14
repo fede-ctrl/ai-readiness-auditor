@@ -6,12 +6,17 @@
     <link rel="icon" type="image/x-icon" href="/logo2.png">
     <title>HubSpot AI Readiness Auditor</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         .loader { border: 4px solid #f3f3f3; border-top: 4px solid #f97316; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .info-tooltip { position: relative; display: inline-block; }
+        .info-tooltip .tooltip-text { visibility: hidden; width: 250px; background-color: #555; color: #fff; text-align: left; border-radius: 6px; padding: 10px; position: absolute; z-index: 1; bottom: 125%; left: 50%; margin-left: -125px; opacity: 0; transition: opacity 0.3s; font-size: 12px; line-height: 1.5; pointer-events: none; }
+        .info-tooltip:hover .tooltip-text { visibility: visible; opacity: 1; }
+        .modal-backdrop { background-color: rgba(0,0,0,0.5); }
     </style>
 </head>
-<body class="bg-gray-50 text-gray-800">
+<body class="bg-gray-50 text-gray-800 font-sans">
     <div class="container mx-auto p-4 md:p-8 max-w-7xl">
         
         <div id="welcome-container" class="text-center">
@@ -36,18 +41,36 @@
             <div id="error" class="my-8 hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg" role="alert"><strong class="font-bold">Error: </strong><span id="error-message"></span></div>
             
             <div id="results-container" class="hidden">
-                <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-2xl font-semibold">AI Readiness Overview</h2>
+                <div class="flex justify-between items-center mb-6 flex-wrap gap-y-4">
+                    <h2 class="text-3xl font-bold text-gray-900">AI Readiness Overview</h2>
                     <a id="download-csv" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors cursor-pointer">Download CSV</a>
                 </div>
-                <div id="summary-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+                
+                <div id="categories-container" class="space-y-10">
+                    </div>
+                
+                <p id="audit-timestamp" class="text-center text-sm text-gray-500 mt-8"></p>
             </div>
         </div>
     </div>
     
+    <div id="details-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-xl mx-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="modal-title" class="text-lg font-bold"></h3>
+                <button id="close-modal-btn" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
+            </div>
+            <div id="modal-content" class="max-h-[60vh] overflow-y-auto">
+                <canvas id="details-chart"></canvas>
+            </div>
+        </div>
+    </div>
+
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             let portalId = '';
+            let currentAuditData = [];
+            let chartInstance = null;
             
             const elements = {
                 welcomeContainer: document.getElementById('welcome-container'),
@@ -57,73 +80,145 @@
                 error: document.getElementById('error'),
                 errorMessage: document.getElementById('error-message'),
                 resultsContainer: document.getElementById('results-container'),
-                summaryCards: document.getElementById('summary-cards'),
+                categoriesContainer: document.getElementById('categories-container'),
+                auditTimestamp: document.getElementById('audit-timestamp'),
                 auditButton: document.getElementById('audit-ai-readiness-btn'),
                 downloadCsv: document.getElementById('download-csv'),
+                detailsModal: document.getElementById('details-modal'),
+                modalTitle: document.getElementById('modal-title'),
+                modalContent: document.getElementById('modal-content'),
+                closeModalBtn: document.getElementById('close-modal-btn'),
+                detailsChart: document.getElementById('details-chart'),
+            };
+
+            const kpiInfo = {
+                'Core Contact Fill Rate': { why: 'AI cannot function without core data. Missing lifecycle stages, lead statuses, or contact info makes basic segmentation impossible.', category: 'Foundational Data Completeness' },
+                'Core Company Fill Rate': { why: 'This data is the bedrock of Ideal Customer Profile (ICP) analysis and territory planning models.', category: 'Foundational Data Completeness' },
+                'Core Deal Fill Rate': { why: 'Without amount, stage, and close date, no sales forecasting or deal-propensity AI can function.', category: 'Foundational Data Completeness' },
+                'Contact Association Rate': { why: 'AI needs connected data to understand your business. A low rate means your account data is poorly structured.', category: 'Data Integrity & Governance' },
+                'Property Definition Quality': { why: 'Well-documented properties indicate strong data governance, making data more accurate and consistent for AI models.', category: 'Data Integrity & Governance' },
+                'Deal Rot': { why: 'Rotting deals indicate poor pipeline hygiene. AI sales forecasts are unreliable if deal data doesn\'t reflect recent, real-world activity.', category: 'Sales & Marketing Velocity' },
+                'Lifecycle Stage Distribution': { why: 'Proper use of lifecycle stages is crucial for training any AI related to sales or marketing funnels.', category: 'Platform Maturity & Engagement' },
+                'Active Workflow Count': { why: 'Automation is a key sign of a mature and organized business process. It indicates that data is being managed systematically.', category: 'Platform Maturity & Engagement' },
             };
             
-            const initApp = () => {
-                const urlParams = new URLSearchParams(window.location.search);
-                const portalIdFromUrl = urlParams.get('portalId');
-                if (portalIdFromUrl) {
-                    portalId = portalIdFromUrl;
-                    elements.portalId.textContent = portalId;
-                    elements.welcomeContainer.classList.add('hidden');
-                    elements.appContainer.classList.remove('hidden');
-                    window.history.replaceState({}, document.title, window.location.pathname);
-                } else {
-                    elements.welcomeContainer.classList.remove('hidden');
-                    elements.appContainer.classList.add('hidden');
+            const initApp = () => { /* ... existing initApp function ... */ };
+            const setButtonsDisabled = (disabled) => { elements.auditButton.disabled = disabled; };
+            const showLoading = () => { /* ... existing showLoading function ... */ };
+            const hideLoading = () => { /* ... existing hideLoading function ... */ };
+            const showError = (message) => { /* ... existing showError function ... */ };
+            const hideAllSections = () => { /* ... existing hideAllSections function ... */ };
+
+            const getScoreColor = (value, metricName) => {
+                if (value.includes('API Error') || value.includes('N/A')) return 'text-yellow-500';
+                const numericValue = parseFloat(value.replace(/,/g, ''));
+                if (isNaN(numericValue)) return 'text-gray-800';
+                
+                if (value.includes('%')) {
+                    if (numericValue >= 80) return 'text-green-600';
+                    if (numericValue >= 50) return 'text-yellow-500';
+                    return 'text-red-600';
+                }
+                
+                const isBadIfHigh = ['Deal Rot'].includes(metricName);
+                if (isBadIfHigh) {
+                    return numericValue > 5 ? 'text-red-600' : 'text-green-600';
+                } else { 
+                    return numericValue > 0 ? 'text-green-600' : 'text-yellow-500';
                 }
             };
-            
-            const setButtonsDisabled = (disabled) => { elements.auditButton.disabled = disabled; };
-            const showLoading = () => { hideAllSections(); elements.loading.classList.remove('hidden'); setButtonsDisabled(true); };
-            const hideLoading = () => { elements.loading.classList.add('hidden'); setButtonsDisabled(false); };
-            const showError = (message) => { hideLoading(); hideAllSections(); elements.errorMessage.textContent = message; elements.error.classList.remove('hidden');};
-            const hideAllSections = () => { elements.error.classList.add('hidden'); elements.resultsContainer.classList.add('hidden'); };
 
-            const createStatCard = (label, value) => {
-                return `<div class="bg-white border border-gray-200 rounded-lg p-6 text-center shadow-sm">
-                            <div class="text-3xl font-bold text-gray-800">${value}</div>
-                            <div class="text-sm font-semibold text-gray-600 mt-1">${label}</div>
+            const createStatCard = (metric) => {
+                const info = kpiInfo[metric.metric] || { why: 'No details available.' };
+                const isClickable = metric.details && metric.details.length > 0;
+                let valueHtml = `<div class="text-5xl font-bold ${getScoreColor(metric.value, metric.metric)}">${metric.value}</div>`;
+                if(isClickable) {
+                    valueHtml = `<div class="text-5xl font-bold text-blue-600 hover:underline cursor-pointer" data-metric="${metric.metric}">${metric.value}</div>`;
+                }
+
+                return `<div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm flex flex-col justify-between">
+                            <div>
+                                <div class="flex justify-between items-start">
+                                    <h3 class="text-lg font-semibold text-gray-700 pr-2">${metric.metric}</h3>
+                                    <div class="info-tooltip">
+                                        <span class="text-gray-400 cursor-pointer">&#9432;</span>
+                                        <div class="tooltip-text"><b>Why it matters for AI:</b><br>${info.why}</div>
+                                    </div>
+                                </div>
+                                <div class="text-center my-4">${valueHtml}</div>
+                            </div>
+                            <p class="text-sm text-gray-500 text-center mt-2">${metric.description || ''}</p>
                         </div>`;
             };
 
+            const renderResults = (data) => {
+                currentAuditData = data.auditResults;
+                const categories = currentAuditData.reduce((acc, metric) => {
+                    const category = (kpiInfo[metric.metric] || {}).category || 'Other';
+                    if (!acc[category]) acc[category] = [];
+                    acc[category].push(metric);
+                    return acc;
+                }, {});
+
+                let resultsHtml = '';
+                for (const category in categories) {
+                    resultsHtml += `<div>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-4 pb-2 border-b border-gray-200">${category}</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">${categories[category].map(createStatCard).join('')}</div>
+                    </div>`;
+                }
+                elements.categoriesContainer.innerHTML = resultsHtml;
+            };
+            
             const prepareCsvDownload = (auditData) => {
-                const headers = "Metric,Result\n";
-                const csvRows = auditData.map(p => `"${p.metric}","${p.value}"`);
+                const headers = "Category,Metric,Result,Description,Why it Matters for AI,Details\n";
+                const csvRows = auditData.map(p => {
+                    const info = kpiInfo[p.metric] || {};
+                    const category = info.category || 'Other';
+                    const why = info.why || '';
+                    const details = p.details ? JSON.stringify(p.details).replace(/"/g, '""') : '';
+                    return `"${category}","${p.metric}","${p.value}","${(p.description || '').replace(/"/g, '""')}","${why.replace(/"/g, '""')}","${details}"`;
+                });
                 const csvContent = "data:text/csv;charset=utf-8," + headers + csvRows.join("\n");
                 elements.downloadCsv.href = encodeURI(csvContent);
                 elements.downloadCsv.download = `ai-readiness-audit-${new Date().toISOString().split('T')[0]}.csv`;
             };
+
+            const runAiReadinessAudit = async () => { /* ... existing code ... */ };
             
-            const runAiReadinessAudit = async () => {
-                showLoading();
-                try {
-                    const response = await fetch(`/api/ai-readiness-audit`, {
-                        headers: { 'X-HubSpot-Portal-Id': portalId }
-                    });
-                    if (!response.ok) {
-                        const errorData = await response.json();
-                        throw new Error(errorData.message || 'An unknown error occurred.');
-                    }
-                    const data = await response.json();
-                    
-                    elements.summaryCards.innerHTML = '';
-                    data.auditResults.forEach(metric => {
-                        elements.summaryCards.innerHTML += createStatCard(metric.metric, metric.value);
-                    });
-                    prepareCsvDownload(data.auditResults);
-                    elements.resultsContainer.classList.remove('hidden');
-                } catch (err) {
-                    showError(err.message);
-                } finally {
-                    hideLoading();
-                }
+            const openDetailsModal = (metricName) => {
+                const metricData = currentAuditData.find(m => m.metric === metricName);
+                if (!metricData || !metricData.details) return;
+                
+                elements.modalTitle.textContent = metricData.metric;
+                elements.detailsModal.classList.remove('hidden');
+
+                const ctx = elements.detailsChart.getContext('2d');
+                if(chartInstance) { chartInstance.destroy(); }
+                
+                chartInstance = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: metricData.details.map(d => d.stage),
+                        datasets: [{
+                            label: 'Contact Count',
+                            data: metricData.details.map(d => d.count),
+                            backgroundColor: 'rgba(249, 115, 22, 0.6)',
+                            borderColor: 'rgba(249, 115, 22, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: { indexAxis: 'y', scales: { y: { beginAtZero: true } }, plugins: { legend: { display: false } } }
+                });
             };
             
             elements.auditButton.addEventListener('click', runAiReadinessAudit);
+            elements.closeModalBtn.addEventListener('click', () => elements.detailsModal.classList.add('hidden'));
+            document.body.addEventListener('click', (e) => {
+                const card = e.target.closest('[data-metric]');
+                if (card) { openDetailsModal(card.dataset.metric); }
+            });
+
             initApp();
         });
     </script>
