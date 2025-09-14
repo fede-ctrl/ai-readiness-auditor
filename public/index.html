@@ -47,7 +47,8 @@
                 </div>
                 
                 <div id="categories-container" class="space-y-10">
-                    </div>
+                    <!-- Categories will be injected here by JavaScript -->
+                </div>
                 
                 <p id="audit-timestamp" class="text-center text-sm text-gray-500 mt-8"></p>
             </div>
@@ -102,12 +103,27 @@
                 'Active Workflow Count': { why: 'Automation is a key sign of a mature and organized business process. It indicates that data is being managed systematically.', category: 'Platform Maturity & Engagement' },
             };
             
-            const initApp = () => { /* ... existing initApp function ... */ };
+            // Your original, working authentication check
+            const initApp = () => {
+                const urlParams = new URLSearchParams(window.location.search);
+                const portalIdFromUrl = urlParams.get('portalId');
+                if (portalIdFromUrl) {
+                    portalId = portalIdFromUrl;
+                    elements.portalId.textContent = portalId;
+                    elements.welcomeContainer.classList.add('hidden');
+                    elements.appContainer.classList.remove('hidden');
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                } else {
+                    elements.welcomeContainer.classList.remove('hidden');
+                    elements.appContainer.classList.add('hidden');
+                }
+            };
+            
             const setButtonsDisabled = (disabled) => { elements.auditButton.disabled = disabled; };
-            const showLoading = () => { /* ... existing showLoading function ... */ };
-            const hideLoading = () => { /* ... existing hideLoading function ... */ };
-            const showError = (message) => { /* ... existing showError function ... */ };
-            const hideAllSections = () => { /* ... existing hideAllSections function ... */ };
+            const showLoading = () => { hideAllSections(); elements.loading.classList.remove('hidden'); setButtonsDisabled(true); };
+            const hideLoading = () => { elements.loading.classList.add('hidden'); setButtonsDisabled(false); };
+            const showError = (message) => { hideLoading(); hideAllSections(); elements.errorMessage.textContent = message; elements.error.classList.remove('hidden'); };
+            const hideAllSections = () => { elements.error.classList.add('hidden'); elements.resultsContainer.classList.add('hidden'); };
 
             const getScoreColor = (value, metricName) => {
                 if (value.includes('API Error') || value.includes('N/A')) return 'text-yellow-500';
@@ -161,12 +177,15 @@
                 }, {});
 
                 let resultsHtml = '';
-                for (const category in categories) {
-                    resultsHtml += `<div>
-                        <h3 class="text-xl font-semibold text-gray-800 mb-4 pb-2 border-b border-gray-200">${category}</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">${categories[category].map(createStatCard).join('')}</div>
-                    </div>`;
-                }
+                const categoryOrder = ['Foundational Data Completeness', 'Data Integrity & Governance', 'Sales & Marketing Velocity', 'Platform Maturity & Engagement'];
+                categoryOrder.forEach(category => {
+                    if(categories[category]) {
+                        resultsHtml += `<div>
+                            <h3 class="text-xl font-semibold text-gray-800 mb-4 pb-2 border-b border-gray-200">${category}</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">${categories[category].map(createStatCard).join('')}</div>
+                        </div>`;
+                    }
+                });
                 elements.categoriesContainer.innerHTML = resultsHtml;
             };
             
@@ -184,7 +203,24 @@
                 elements.downloadCsv.download = `ai-readiness-audit-${new Date().toISOString().split('T')[0]}.csv`;
             };
 
-            const runAiReadinessAudit = async () => { /* ... existing code ... */ };
+            const runAiReadinessAudit = async () => {
+                showLoading();
+                try {
+                    const response = await fetch(`/api/ai-readiness-audit`, {
+                        headers: { 'X-HubSpot-Portal-Id': portalId }
+                    });
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.message || 'An unknown error occurred.');
+                    }
+                    const data = await response.json();
+                    renderResults(data);
+                    prepareCsvDownload(data.auditResults);
+                    elements.auditTimestamp.textContent = `Audit fetched at: ${new Date().toLocaleString()}`;
+                    elements.resultsContainer.classList.remove('hidden');
+                } catch (err) { showError(err.message); } 
+                finally { hideLoading(); }
+            };
             
             const openDetailsModal = (metricName) => {
                 const metricData = currentAuditData.find(m => m.metric === metricName);
